@@ -53,6 +53,18 @@ uint32_t test_lfence = DEFAULT_LFENCE;
 uint32_t test_sfence = DEFAULT_SFENCE;
 
 
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+
+typedef struct
+{
+  abs_deviation_t store[PFD_NUM_STORES];
+  uint8_t store_valid[PFD_NUM_STORES];
+} core_summary_t;
+
+static core_summary_t* core_summaries;
+
 static void store_0(volatile cache_line_t* cache_line, volatile uint64_t reps);
 static void store_0_no_pf(volatile cache_line_t* cache_line, volatile uint64_t reps);
 static void store_0_eventually(volatile cache_line_t* cl, volatile uint64_t reps);
@@ -73,6 +85,7 @@ static uint32_t swap(volatile cache_line_t* cl, volatile uint64_t reps);
 
 static size_t parse_size(char* optarg);
 static void create_rand_list_cl(volatile uint64_t* list, size_t n);
+static void collect_core_stats(uint32_t store, uint32_t num_vals, uint32_t num_print);
 
 
 int
@@ -324,6 +337,16 @@ main(int argc, char **argv)
   seeds = seed_rand();
 
   volatile cache_line_t* cache_line = cache_line_open();
+
+  size_t summary_bytes = test_cores * sizeof(core_summary_t);
+  core_summaries = (core_summary_t*) mmap(NULL, summary_bytes, PROT_READ | PROT_WRITE,
+                                          MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (core_summaries == MAP_FAILED)
+    {
+      perror("mmap");
+      exit(1);
+    }
+  memset(core_summaries, 0, summary_bytes);
 
   int rank;
   for (rank = 1; rank < test_cores; rank++) 
@@ -1071,10 +1094,10 @@ main(int argc, char **argv)
 	      if (ID < 2)
 		{
 		  PRINT(" *** Core %ld ************************************************************************************", core);
-		  PFDPN(0, test_reps, test_print);
+		  collect_core_stats(0, test_reps, test_print);
 		  if (ID == 1)
 		    {
-		      PFDPN(1, test_reps, test_print);
+		      collect_core_stats(1, test_reps, test_print);
 		    }
 		}
 	      break;
@@ -1082,26 +1105,26 @@ main(int argc, char **argv)
 	      if (ID < 2)
 		{
 		  PRINT(" *** Core %ld ************************************************************************************", core);
-		  PFDPN(0, test_reps, test_print);
+		  collect_core_stats(0, test_reps, test_print);
 		}
 	      break;
 	    case LOAD_FROM_L1:
 	      if (ID < 1)
 		{
 		  PRINT(" *** Core %ld ************************************************************************************", core);
-		  PFDPN(0, test_reps, test_print);
+		  collect_core_stats(0, test_reps, test_print);
 		}
 	      break;
 	    case LOAD_FROM_MEM_SIZE:
 	      if (ID < test_cores)
 		{
 		  PRINT(" *** Core %ld ************************************************************************************", core);
-		  PFDPN(0, test_reps, test_print);
+		  collect_core_stats(0, test_reps, test_print);
 		}
 	      break;
 	    default:
 	      PRINT(" *** Core %ld ************************************************************************************", core);
-	      PFDPN(0, test_reps, test_print);
+	      collect_core_stats(0, test_reps, test_print);
 	    }
 	}
       B0;
@@ -1111,10 +1134,67 @@ main(int argc, char **argv)
 
   if (ID == 0)
     {
+      PRINT(" ---- Cross-core summary ------------------------------------------------------------");
+      double min_avg = DBL_MAX;
+      double max_avg = 0.0;
+      double sum_avg = 0.0;
+      uint32_t min_core = 0;
+      uint32_t max_core = 0;
+      uint32_t cores_with_stats = 0;
+
+      uint32_t core_idx;
+      for (core_idx = 0; core_idx < test_cores; core_idx++)
+        {
+          const core_summary_t* summary = &core_summaries[core_idx];
+          const abs_deviation_t* stats = NULL;
+          uint32_t store_idx;
+          for (store_idx = 0; store_idx < PFD_NUM_STORES; store_idx++)
+            {
+              if (summary->store_valid[store_idx])
+                {
+                  stats = &summary->store[store_idx];
+                  break;
+                }
+            }
+
+          if (stats == NULL)
+            {
+              PRINT(" Core %u : no samples recorded", test_cores_array[core_idx]);
+              continue;
+            }
+
+          double avg = stats->avg;
+          PRINT(" Core %u : avg %8.1f cycles (min %8.1f | max %8.1f)",
+                test_cores_array[core_idx], avg, stats->min_val, stats->max_val);
+          sum_avg += avg;
+          cores_with_stats++;
+          if (avg < min_avg)
+            {
+              min_avg = avg;
+              min_core = test_cores_array[core_idx];
+            }
+          if (avg > max_avg)
+            {
+              max_avg = avg;
+              max_core = test_cores_array[core_idx];
+            }
+        }
+
+      if (cores_with_stats > 0)
+        {
+          double mean_avg = sum_avg / cores_with_stats;
+          PRINT(" Summary : mean avg %8.1f cycles | min avg %8.1f (core %u) | max avg %8.1f (core %u)",
+                mean_avg, min_avg, min_core, max_avg, max_core);
+        }
+      else
+        {
+          PRINT(" Summary : no statistics captured");
+        }
+
       switch (test_test)
-	{
-	case STORE_ON_MODIFIED:
-	  {
+        {
+        case STORE_ON_MODIFIED:
+          {
 	    if (test_flush)
 	      {
 		PRINT(" ** Results from Core 0 : store on invalid");
@@ -1981,7 +2061,25 @@ parse_size(char* optarg)
   return test_mem_size_multi * atoi(optarg);
 }
 
-volatile cache_line_t* 
+static void
+collect_core_stats(uint32_t store, uint32_t num_vals, uint32_t num_print)
+{
+  abs_deviation_t stats;
+  pfd_collect_abs_deviation(store, num_vals, num_print, &stats);
+
+  if (core_summaries == NULL || (void*) core_summaries == MAP_FAILED)
+    {
+      return;
+    }
+
+  if (ID < test_cores && store < PFD_NUM_STORES)
+    {
+      core_summaries[ID].store[store] = stats;
+      core_summaries[ID].store_valid[store] = 1;
+    }
+}
+
+volatile cache_line_t*
 cache_line_open()
 {
   uint64_t size = test_cache_line_num * sizeof(cache_line_t);
