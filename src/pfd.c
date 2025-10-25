@@ -140,8 +140,8 @@ void
 print_abs_deviation(const abs_deviation_t* abs_dev)
 {
   printf("\n ---- statistics:\n");
-  PRINT("    avg : %-10.1f abs dev : %-10.1f std dev : %-10.1f num     : %llu", 
-	abs_dev->avg, abs_dev->abs_dev, abs_dev->std_dev, (llu) abs_dev->num_vals);
+  PRINT("    avg : %-10.1f abs dev : %-10.1f std dev : %-10.1f num     : %llu",
+        abs_dev->avg, abs_dev->abs_dev, abs_dev->std_dev, (llu) abs_dev->num_vals);
   PRINT("    min : %-10.1f (element: %6llu)    max     : %-10.1f (element: %6llu)", abs_dev->min_val, 
 	(llu) abs_dev->min_val_idx, abs_dev->max_val, (llu) abs_dev->max_val_idx);
   double v10p = 100 * 
@@ -157,8 +157,8 @@ print_abs_deviation(const abs_deviation_t* abs_dev)
   double v50p = 100 * 
     (1 - (abs_dev->num_vals - abs_dev->num_dev_50p) / (double) abs_dev->num_vals);
   double std_50pp = 100 * (1 - (abs_dev->avg_50p - abs_dev->std_dev_50p) / abs_dev->avg_50p);
-  PRINT(" 25-50%% : %-10u ( %5.1f%%  |  avg:  %6.1f  |  abs dev: %6.1f  |  std dev: %6.1f = %5.1f%% )", 
-	abs_dev->num_dev_50p, v50p, abs_dev->avg_50p, abs_dev->abs_dev_50p, abs_dev->std_dev_50p, std_50pp);
+  PRINT(" 25-50%% : %-10u ( %5.1f%%  |  avg:  %6.1f  |  abs dev: %6.1f  |  std dev: %6.1f = %5.1f%% )",
+        abs_dev->num_dev_50p, v50p, abs_dev->avg_50p, abs_dev->abs_dev_50p, abs_dev->std_dev_50p, std_50pp);
   double v75p = 100 * 
     (1 - (abs_dev->num_vals - abs_dev->num_dev_75p) / (double) abs_dev->num_vals);
   double std_75pp = 100 * (1 - (abs_dev->avg_75p - abs_dev->std_dev_75p) / abs_dev->avg_75p);
@@ -169,6 +169,31 @@ print_abs_deviation(const abs_deviation_t* abs_dev)
   double std_rspp = 100 * (1 - (abs_dev->avg_rst - abs_dev->std_dev_rst) / abs_dev->avg_rst);
   PRINT("75-100%% : %-10u ( %5.1f%%  |  avg:  %6.1f  |  abs dev: %6.1f  |  std dev: %6.1f = %5.1f%% )\n", 
 	abs_dev->num_dev_rst, vrest, abs_dev->avg_rst, abs_dev->abs_dev_rst, abs_dev->std_dev_rst, std_rspp);
+}
+
+void
+pfd_collect_abs_deviation(uint32_t store, uint32_t num_vals, uint32_t num_print,
+                          abs_deviation_t* out)
+{
+  uint32_t p = num_print;
+  if (p > num_vals)
+    {
+      p = num_vals;
+    }
+
+  for (uint32_t i = 0; i < p; i++)
+    {
+      printf("[%3d: %4ld] ", i, (long int) pfd_store[store][i]);
+    }
+
+  abs_deviation_t ad;
+  get_abs_deviation(pfd_store[store], num_vals, &ad);
+  print_abs_deviation(&ad);
+
+  if (out != NULL)
+    {
+      *out = ad;
+    }
 }
 
 #define PFD_VAL_UP_LIMIT 1500	/* do not consider values higher than this value */

@@ -131,6 +131,8 @@ typedef struct abs_deviation
 extern volatile ticks** pfd_store;
 extern volatile ticks* _pfd_s;
 extern volatile ticks pfd_correction;
+void pfd_collect_abs_deviation(uint32_t store, uint32_t num_vals, uint32_t num_print,
+                               abs_deviation_t* out);
 #if !defined(DO_TIMINGS)
 #  define PFDINIT(num_entries) 
 #  define PFDI(store) 
@@ -158,19 +160,8 @@ extern volatile ticks pfd_correction;
     reps;								\
   }
 
-#  define PFDPN(store, num_vals, num_print)				\
-  {									\
-    uint32_t _i;							\
-    uint32_t p = num_print;						\
-    if (p > num_vals) { p = num_vals; }					\
-    for (_i = 0; _i < p; _i++)						\
-      {									\
-	printf("[%3d: %4ld] ", _i, (long int) pfd_store[store][_i]);	\
-      }									\
-    abs_deviation_t ad;							\
-    get_abs_deviation(pfd_store[store], num_vals, &ad);			\
-    print_abs_deviation(&ad);						\
-  }
+#  define PFDPN(store, num_vals, num_print) \
+  pfd_collect_abs_deviation(store, num_vals, num_print, NULL)
 #endif /* !DO_TIMINGS */
 
 # define PFDPREFTCH(store, entry)		\
