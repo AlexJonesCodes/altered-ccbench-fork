@@ -971,20 +971,18 @@ main(int argc, char **argv)
 	      }
 	    break;
 	  }
-	case CAS_CONCURRENT: /* 24 */
-	  {
-	    switch (ID)
-	      {
-	      case 0:
-	      case 1:
-		sum += cas(cache_line, reps);
-		break;
-	      default:
-		sum += cas_no_pf(cache_line, reps);
-		break;
-	      }
-	    break;
-	  }
+        case CAS_CONCURRENT: /* 24 */
+          {
+            if (ID < test_cores)
+              {
+                sum += cas(cache_line, reps);
+              }
+            else
+              {
+                sum += cas_no_pf(cache_line, reps);
+              }
+            break;
+          }
 	case FAI_ON_INVALID:	/* 25 */
 	  {
 	    switch (ID)
@@ -1101,13 +1099,10 @@ main(int argc, char **argv)
 		    }
 		}
 	      break;
-	    case CAS_CONCURRENT:
-	      if (ID < 2)
-		{
-		  PRINT(" *** Core %ld ************************************************************************************", core);
-		  collect_core_stats(0, test_reps, test_print);
-		}
-	      break;
+            case CAS_CONCURRENT:
+              PRINT(" *** Core %ld ************************************************************************************", core);
+              collect_core_stats(0, test_reps, test_print);
+              break;
 	    case LOAD_FROM_L1:
 	      if (ID < 1)
 		{
@@ -1447,11 +1442,11 @@ main(int argc, char **argv)
 	      }
 	    break;
 	  }
-	case CAS_CONCURRENT:
-	  {
-	    PRINT(" ** Results from Cores 0 & 1: CAS concurrent");
-	    break;
-	  }
+        case CAS_CONCURRENT:
+          {
+            PRINT(" ** Results from %u cores: CAS concurrent", test_cores);
+            break;
+          }
 	case FAI_ON_INVALID:
 	  {
 	    PRINT(" ** Results from Core 0 : FAI on invalid");
