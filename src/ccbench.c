@@ -28,8 +28,9 @@
  */
 
 #include "ccbench.h"
+#include <pthread.h>
 
-uint8_t ID;
+THREAD_LOCAL uint8_t ID;
 unsigned long* seeds;
 
 #if defined(__tile__)
@@ -64,6 +65,10 @@ typedef struct
 } core_summary_t;
 
 static core_summary_t* core_summaries;
+static volatile cache_line_t* shared_cache_line;
+
+static void run_worker(uint32_t rank);
+static void* worker_trampoline(void* arg);
 
 static void store_0(volatile cache_line_t* cache_line, volatile uint64_t reps);
 static void store_0_no_pf(volatile cache_line_t* cache_line, volatile uint64_t reps);
@@ -336,7 +341,7 @@ main(int argc, char **argv)
   barriers_init(test_cores);
   seeds = seed_rand();
 
-  volatile cache_line_t* cache_line = cache_line_open();
+  shared_cache_line = cache_line_open();
 
   size_t summary_bytes = test_cores * sizeof(core_summary_t);
   core_summaries = (core_summary_t*) mmap(NULL, summary_bytes, PROT_READ | PROT_WRITE,
@@ -348,23 +353,58 @@ main(int argc, char **argv)
     }
   memset(core_summaries, 0, summary_bytes);
 
-  int rank;
-  for (rank = 1; rank < test_cores; rank++) 
+  pthread_t* threads = NULL;
+  if (test_cores > 1)
     {
-      pid_t child = fork();
-      if (child < 0) 
-		{
-			P("Failure in fork():\n%s", strerror(errno));
-		} 
-			else if (child == 0) 
-		{
-			goto fork_done;
-		}
+      threads = calloc(test_cores - 1, sizeof(pthread_t));
+      if (threads == NULL)
+        {
+          perror("calloc");
+          exit(1);
+        }
     }
-  rank = 0;
 
- fork_done:
+  uint32_t rank;
+  for (rank = 1; rank < test_cores; rank++)
+    {
+      int rc = pthread_create(&threads[rank - 1], NULL, worker_trampoline, (void*) (uintptr_t) rank);
+      if (rc != 0)
+        {
+          fprintf(stderr, "pthread_create failed: %s\n", strerror(rc));
+          exit(1);
+        }
+    }
+
+  run_worker(0);
+
+  for (rank = 1; rank < test_cores; rank++)
+    {
+      int rc = pthread_join(threads[rank - 1], NULL);
+      if (rc != 0)
+        {
+          fprintf(stderr, "pthread_join failed: %s\n", strerror(rc));
+          exit(1);
+        }
+    }
+
+  free(threads);
+
+  return 0;
+}
+
+static void*
+worker_trampoline(void* arg)
+{
+  uint32_t rank = (uint32_t) (uintptr_t) arg;
+  run_worker(rank);
+  return NULL;
+}
+
+static void
+run_worker(uint32_t rank)
+{
   ID = rank;
+  volatile cache_line_t* cache_line = shared_cache_line;
   size_t core = 0;
   core = test_cores_array[rank];
 
@@ -1498,9 +1538,9 @@ main(int argc, char **argv)
     }
   cache_line_close(ID, "cache_line");
   barriers_term(ID);
-  return 0;
 
 }
+
 
 uint32_t
 cas(volatile cache_line_t* cl, volatile uint64_t reps)

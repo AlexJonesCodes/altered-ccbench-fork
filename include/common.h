@@ -39,5 +39,11 @@
 #define P(args...) printf("[%02d] ", ID); printf(args); printf("\n"); fflush(stdout)
 #define PRINT P
 
-extern uint8_t ID;
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define THREAD_LOCAL _Thread_local
+#else
+#define THREAD_LOCAL __thread
+#endif
+
+extern THREAD_LOCAL uint8_t ID;
 #endif
