@@ -339,7 +339,6 @@ main(int argc, char **argv)
     }
 
   barriers_init(test_cores);
-  seeds = seed_rand();
 
   shared_cache_line = cache_line_open();
 
@@ -424,6 +423,13 @@ run_worker(uint32_t rank)
 #if defined(__tile__)
   tmc_cmem_init(0);		/*   initialize shared memory */
 #endif  /* TILERA */
+
+  seeds = seed_rand();
+  if (seeds == NULL)
+    {
+      perror("seed_rand");
+      exit(1);
+    }
 
   volatile uint64_t* cl = (volatile uint64_t*) cache_line;
 

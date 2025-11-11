@@ -46,6 +46,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sched.h>
+#include <pthread.h>
 #include <assert.h>
 #include <float.h>
 #include <getopt.h>
@@ -225,12 +226,13 @@ set_cpu(int cpu)
   CPU_SET(cpu, &mask);
 
 
-  if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
-    
-      printf("Problem with setting processor affinity: %s\n",
-        strerror(errno));
+  int rc = pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask);
+  if (rc != 0)
+    {
+      errno = rc;
+      printf("Problem with setting processor affinity: %s\n", strerror(errno));
       exit(3);
-  }
+    }
 
   printf("Requested cpu: %d, now running on cpu: %d\n",cpu, sched_getcpu());
 #endif
@@ -314,7 +316,7 @@ static inline ticks getticks_correction_calc()
     return seeds;
   }
 
-extern unsigned long* seeds;
+extern THREAD_LOCAL unsigned long* seeds;
   //Marsaglia's xorshf generator //period 2^96-1
 static inline unsigned long
 xorshf96(unsigned long* x, unsigned long* y, unsigned long* z) 
