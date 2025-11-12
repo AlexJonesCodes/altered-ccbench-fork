@@ -161,14 +161,19 @@ pfd_store_init(uint32_t num_entries)
 
   abs_deviation_t ad;
   get_abs_deviation(pfd_store[0], num_entries, &ad);
-  double std_pp = 100 * (1 - (ad.avg - ad.std_dev) / ad.avg);
+  double std_pp = NAN;
+  if (isfinite(ad.avg) && ad.avg != 0.0)
+    {
+      std_pp = 100 * (1 - (ad.avg - ad.std_dev) / ad.avg);
+    }
 
   if (std_pp > PFD_CORRECTION_CONF)
     {
       if (print_warning++ == 1)	/* print warning if 2 failed attempts */
 	{
-	  printf("* warning: avg pfd correction is %.1f with std deviation: %.1f%%. Recalculating.\n", 
-		 ad.avg, std_pp);
+          double printed_std_pp = isfinite(std_pp) ? std_pp : 0.0;
+          printf("* warning: avg pfd correction is %.1f with std deviation: %.1f%%. Recalculating.\n",
+                 ad.avg, printed_std_pp);
 	}
       if (tries-- > 0)
 	{
@@ -287,9 +292,31 @@ pfd_store_init(uint32_t num_entries)
 
   ad.avg = corrected_avg;
   pfd_correction = correction;
+  if (pfd_correction <= 0)
+    {
+      /* As a last resort, ensure that the profiler still has a positive
+         correction.  This can occur if all measurement attempts returned
+         zero (e.g. due to aggressive virtualisation). */
+      pfd_correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
+      if (pfd_correction == 0)
+        {
+          pfd_correction = 1;
+        }
+      corrected_avg = (double) pfd_correction;
+      ad.avg = corrected_avg;
+      if (!isfinite(std_pp))
+        {
+          std_pp = 0.0;
+        }
+      printf("* warning: falling back to conservative pfd correction of %llu cycles.\n",
+             (long long unsigned int) pfd_correction);
+    }
+
   assert(pfd_correction > 0);
-  
-  printf("* set pfd correction: %llu (std deviation: %.1f%%)\n", (long long unsigned int) pfd_correction, std_pp);
+
+  double printed_std_pp = isfinite(std_pp) ? std_pp : 0.0;
+  printf("* set pfd correction: %llu (std deviation: %.1f%%)\n",
+         (long long unsigned int) pfd_correction, printed_std_pp);
 }
 
 static inline 
