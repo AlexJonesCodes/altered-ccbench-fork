@@ -330,38 +330,22 @@ pfd_store_init(uint32_t num_entries)
   pfd_correction = correction;
   if (pfd_correction <= 0)
     {
-      /* The adjustment can still end up zero when the rdtsc delta never
-         increased above the noise floor.  Try another direct measurement
-         before falling back to the conservative constant. */
-      ticks measured = measure_minimum_tick_delta(64);
-      if (measured > 0)
+      /* As a last resort, ensure that the profiler still has a positive
+         correction.  This can occur if all measurement attempts returned
+         zero (e.g. due to aggressive virtualisation). */
+      pfd_correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
+      if (pfd_correction == 0)
         {
-          pfd_correction = measured;
-          corrected_avg = (double) pfd_correction;
-          ad.avg = corrected_avg;
-          if (!isfinite(std_pp))
-            {
-              std_pp = 0.0;
-            }
-          printf("* warning: enforcing positive pfd correction via direct rdtsc delta of %llu cycles.\n",
-                 (long long unsigned int) pfd_correction);
+          pfd_correction = 1;
         }
-      else
+      corrected_avg = (double) pfd_correction;
+      ad.avg = corrected_avg;
+      if (!isfinite(std_pp))
         {
-          pfd_correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
-          if (pfd_correction == 0)
-            {
-              pfd_correction = 1;
-            }
-          corrected_avg = (double) pfd_correction;
-          ad.avg = corrected_avg;
-          if (!isfinite(std_pp))
-            {
-              std_pp = 0.0;
-            }
-          printf("* warning: falling back to conservative pfd correction of %llu cycles.\n",
-                 (long long unsigned int) pfd_correction);
+          std_pp = 0.0;
         }
+      printf("* warning: falling back to conservative pfd correction of %llu cycles.\n",
+             (long long unsigned int) pfd_correction);
     }
 
   assert(pfd_correction > 0);
