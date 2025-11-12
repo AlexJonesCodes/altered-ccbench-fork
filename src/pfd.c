@@ -42,6 +42,32 @@ THREAD_LOCAL volatile ticks** pfd_store;
 THREAD_LOCAL volatile ticks* _pfd_s;
 THREAD_LOCAL volatile ticks pfd_correction;
 
+static ticks
+measure_minimum_tick_delta(uint32_t attempts)
+{
+  ticks best = UINT64_MAX;
+
+  for (uint32_t i = 0; i < attempts; i++)
+    {
+      ticks start = getticks();
+      asm volatile ("" ::: "memory");
+      ticks end = getticks();
+      ticks delta = end - start;
+
+      if (delta > 0 && delta < best)
+        {
+          best = delta;
+        }
+    }
+
+  if (best == UINT64_MAX)
+    {
+      return 0;
+    }
+
+  return best;
+}
+
 static int
 ticks_compare(const void* lhs, const void* rhs)
 {
@@ -237,11 +263,21 @@ pfd_store_init(uint32_t num_entries)
          profiling overhead is too small to be observed accurately on this
          platform (e.g. due to coarse timers or aggressive virtualisation).
          Ensure we still subtract a sensible positive value so that later
-         computations never underflow.  Use the same conservative fallback as
-         the unknown-architecture branch above. */
-      corrected_avg = PFD_CONSERVATIVE_DEFAULT;
-      printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
-             corrected_avg);
+         computations never underflow.  Prefer a directly measured TSC delta,
+         falling back to a conservative constant if the timer never advanced. */
+      ticks measured = measure_minimum_tick_delta(64);
+      if (measured > 0)
+        {
+          corrected_avg = (double) measured;
+          printf("* warning: measured pfd correction <= 0; using direct rdtsc delta of %llu.\n",
+                 (long long unsigned int) measured);
+        }
+      else
+        {
+          corrected_avg = PFD_CONSERVATIVE_DEFAULT;
+          printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
+                 corrected_avg);
+        }
     }
   else if (corrected_avg < 1.0)
     {
