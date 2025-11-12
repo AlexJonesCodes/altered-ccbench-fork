@@ -31,7 +31,7 @@
 #include <pthread.h>
 
 THREAD_LOCAL uint8_t ID;
-unsigned long* seeds;
+THREAD_LOCAL unsigned long* seeds;
 
 #if defined(__tile__)
 cpu_set_t cpus;
