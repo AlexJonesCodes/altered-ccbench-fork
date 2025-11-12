@@ -42,6 +42,70 @@ THREAD_LOCAL volatile ticks** pfd_store;
 THREAD_LOCAL volatile ticks* _pfd_s;
 THREAD_LOCAL volatile ticks pfd_correction;
 
+static int
+ticks_compare(const void* lhs, const void* rhs)
+{
+  const ticks a = *(const ticks*) lhs;
+  const ticks b = *(const ticks*) rhs;
+
+  if (a < b)
+    {
+      return -1;
+    }
+  if (a > b)
+    {
+      return 1;
+    }
+  return 0;
+}
+
+static double
+median_non_zero_ticks(const volatile ticks* samples, uint32_t num_entries)
+{
+  if (num_entries == 0)
+    {
+      return NAN;
+    }
+
+  ticks* scratch = (ticks*) malloc(num_entries * sizeof(ticks));
+  if (scratch == NULL)
+    {
+      return NAN;
+    }
+
+  size_t count = 0;
+  for (uint32_t i = 0; i < num_entries; i++)
+    {
+      ticks value = samples[i];
+      if (value == 0)
+        {
+          continue;
+        }
+      scratch[count++] = value;
+    }
+
+  if (count == 0)
+    {
+      free(scratch);
+      return NAN;
+    }
+
+  qsort(scratch, count, sizeof(ticks), ticks_compare);
+
+  double median;
+  if ((count & 1) == 0)
+    {
+      median = ((double) scratch[count / 2 - 1] + (double) scratch[count / 2]) / 2.0;
+    }
+  else
+    {
+      median = (double) scratch[count / 2];
+    }
+
+  free(scratch);
+  return median;
+}
+
 void 
 pfd_store_init(uint32_t num_entries)
 {
@@ -111,30 +175,41 @@ pfd_store_init(uint32_t num_entries)
 	  goto retry;
 	}
       else
-	{
-	  printf("* warning: setting pfd correction manually\n");
+        {
+          printf("* warning: setting pfd correction manually\n");
+          double manual_avg = median_non_zero_ticks(pfd_store[0], num_entries);
+          if (isfinite(manual_avg) && manual_avg > 0)
+            {
+              ad.avg = manual_avg;
+              printf("* warning: using median pfd correction of %.1f cycles after repeated retries.\n",
+                     ad.avg);
+            }
+          else
+            {
 #if defined(OPTERON)
-	  ad.avg = 64;
+              ad.avg = 64;
 #elif defined(OPTERON2)
-	  ad.avg = 68;
+              ad.avg = 68;
 #elif defined(XEON) || defined(XEON2)
-	  ad.avg = 20;
+              ad.avg = 20;
 #elif defined(NIAGARA)
-	  ad.avg = 76;
+              ad.avg = 76;
 #elif defined(RYZEN53600)
-          ad.avg = 32;
+              ad.avg = 32;
 #elif defined(i3_7020U)
-          ad.avg = 25;
+              ad.avg = 25;
 #else
-          printf("* warning: no default value for pfd correction is provided (fix in src/pfd.c)\n");
-          /* Ensure that we still end up with a positive correction value even
-             when running on an unknown architecture.  The exact value is not
-             critical (it simply compensates for measurement overhead), but it
-             must be greater than zero to keep the profiler functional.  Use a
-             conservative default that mirrors the values used on similar x86
-             systems. */
-          ad.avg = PFD_CONSERVATIVE_DEFAULT;
+              printf("* warning: unknown architecture; using conservative pfd correction default of %.0f cycles.\n",
+                     PFD_CONSERVATIVE_DEFAULT);
+              /* Ensure that we still end up with a positive correction value even
+                 when running on an unknown architecture.  The exact value is not
+                 critical (it simply compensates for measurement overhead), but it
+                 must be greater than zero to keep the profiler functional.  Use a
+                 conservative default that mirrors the values used on similar x86
+                 systems. */
+              ad.avg = PFD_CONSERVATIVE_DEFAULT;
 #endif
+            }
         }
     }
 
@@ -205,7 +280,7 @@ pfd_store_init(uint32_t num_entries)
          Ensure we still subtract a sensible positive value so that later
          computations never underflow.  Use the same conservative fallback as
          the unknown-architecture branch above. */
-      ad.avg = 32;
+      ad.avg = PFD_CONSERVATIVE_DEFAULT;
       printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
              ad.avg);
     }
