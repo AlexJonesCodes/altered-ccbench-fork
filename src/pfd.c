@@ -186,21 +186,28 @@ pfd_store_init(uint32_t num_entries)
   else
     {
       correction = (ticks) (corrected_avg + 0.5);
-    }
-
-  if (correction == 0)
-    {
-      /* A correction of zero would immediately trip the assertion below.  Use
-         the conservative fallback (or the smallest positive value if that
-         still truncates to zero) so the profiler can continue. */
-      correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
       if (correction == 0)
         {
+          /* Rounding still produced zero (e.g. due to subnormal doubles).  Use
+             the minimum positive correction so the profiler remains usable. */
           correction = 1;
+          corrected_avg = (double) correction;
+          printf("* warning: rounded pfd correction was 0; clamping to %llu\n",
+                 (long long unsigned int) correction);
         }
-      corrected_avg = (double) correction;
-      printf("* warning: computed pfd correction was 0; forcing %llu\n",
-             (long long unsigned int) correction);
+    }
+
+  if (ad.avg <= 0)
+    {
+      /* When the measured correction is zero or negative it means that the
+         profiling overhead is too small to be observed accurately on this
+         platform (e.g. due to coarse timers or aggressive virtualisation).
+         Ensure we still subtract a sensible positive value so that later
+         computations never underflow.  Use the same conservative fallback as
+         the unknown-architecture branch above. */
+      ad.avg = 32;
+      printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
+             ad.avg);
     }
 
   ad.avg = corrected_avg;
