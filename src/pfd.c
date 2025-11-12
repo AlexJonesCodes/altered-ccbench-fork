@@ -36,13 +36,27 @@
 #include <math.h>
 #include "atomic_ops.h"
 
-volatile ticks** pfd_store;
-volatile ticks* _pfd_s;
-volatile ticks pfd_correction;
+THREAD_LOCAL volatile ticks** pfd_store;
+THREAD_LOCAL volatile ticks* _pfd_s;
+THREAD_LOCAL volatile ticks pfd_correction;
 
 void 
 pfd_store_init(uint32_t num_entries)
 {
+  if (pfd_store != NULL)
+    {
+      for (uint32_t i = 0; i < PFD_NUM_STORES; i++)
+        {
+          free((void*) pfd_store[i]);
+          pfd_store[i] = NULL;
+        }
+      free((void*) pfd_store);
+      pfd_store = NULL;
+    }
+
+  free((void*) _pfd_s);
+  _pfd_s = NULL;
+
   _pfd_s = (volatile ticks*) malloc(PFD_NUM_STORES * sizeof(ticks));
   pfd_store = (volatile ticks**) malloc(PFD_NUM_STORES * sizeof(ticks*));
   assert(_pfd_s != NULL && pfd_store != NULL);
