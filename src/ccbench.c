@@ -31,7 +31,7 @@
 #include <pthread.h>
 
 THREAD_LOCAL uint8_t ID;
-THREAD_LOCAL unsigned long* seeds;
+unsigned long* seeds;
 
 #if defined(__tile__)
 cpu_set_t cpus;
@@ -1544,9 +1544,6 @@ run_worker(uint32_t rank)
     }
   cache_line_close(ID, "cache_line");
   barriers_term(ID);
-
-  free(seeds);
-  seeds = NULL;
 
 }
 
