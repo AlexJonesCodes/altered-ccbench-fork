@@ -124,7 +124,14 @@ pfd_store_init(uint32_t num_entries)
 #elif defined(i3_7020U)
     ad.avg = 25;
 #else
-	  printf("* warning: no default value for pfd correction is provided (fix in src/pfd.c)\n");
+          printf("* warning: no default value for pfd correction is provided (fix in src/pfd.c)\n");
+          /* Ensure that we still end up with a positive correction value even
+             when running on an unknown architecture.  The exact value is not
+             critical (it simply compensates for measurement overhead), but it
+             must be greater than zero to keep the profiler functional.  Use a
+             conservative default that mirrors the values used on similar x86
+             systems. */
+          ad.avg = 32;
 #endif
 	}
     }
