@@ -29,6 +29,8 @@
 
 #include "ccbench.h"
 #include <pthread.h>
+#include <strings.h>
+#include <ctype.h>
 
 THREAD_LOCAL uint8_t ID;
 THREAD_LOCAL unsigned long* seeds;
@@ -66,9 +68,17 @@ typedef struct
 
 static core_summary_t* core_summaries;
 static volatile cache_line_t* shared_cache_line;
+static uint32_t* allocated_cores_array;
+static size_t allocated_cores_capacity;
+static int cores_option_explicit;
+static int cores_array_explicit;
+static uint32_t configured_cores_array_len;
 
 static void run_worker(uint32_t rank);
 static void* worker_trampoline(void* arg);
+static void ensure_cores_array_capacity(size_t required);
+static void assign_default_cores_array(uint32_t num_cores);
+static void parse_cores_array_option(const char* arg);
 
 static void store_0(volatile cache_line_t* cache_line, volatile uint64_t reps);
 static void store_0_no_pf(volatile cache_line_t* cache_line, volatile uint64_t reps);
@@ -91,6 +101,170 @@ static uint32_t swap(volatile cache_line_t* cl, volatile uint64_t reps);
 static size_t parse_size(char* optarg);
 static void create_rand_list_cl(volatile uint64_t* list, size_t n);
 static void collect_core_stats(uint32_t store, uint32_t num_vals, uint32_t num_print);
+static int parse_test_option(const char* arg);
+
+static void
+ensure_cores_array_capacity(size_t required)
+{
+  if (required <= allocated_cores_capacity)
+    {
+      return;
+    }
+
+  size_t new_capacity = required;
+  uint32_t* new_array = (uint32_t*) realloc(allocated_cores_array, new_capacity * sizeof(uint32_t));
+  if (new_array == NULL)
+    {
+      perror("realloc");
+      exit(1);
+    }
+
+  allocated_cores_array = new_array;
+  allocated_cores_capacity = new_capacity;
+}
+
+static void
+assign_default_cores_array(uint32_t num_cores)
+{
+  size_t default_len = sizeof(default_cores) / sizeof(default_cores[0]);
+
+  if (!cores_array_explicit && num_cores <= default_len && allocated_cores_array == NULL)
+    {
+      test_cores_array = DEFAULT_CORES_ARRAY;
+      configured_cores_array_len = num_cores;
+      return;
+    }
+
+  ensure_cores_array_capacity(num_cores);
+  for (uint32_t idx = 0; idx < num_cores; idx++)
+    {
+      allocated_cores_array[idx] = idx;
+    }
+  test_cores_array = allocated_cores_array;
+  configured_cores_array_len = num_cores;
+}
+
+static void
+parse_cores_array_option(const char* arg)
+{
+  size_t len = strlen(arg);
+  if (len < 2 || arg[0] != '[' || arg[len - 1] != ']')
+    {
+      fprintf(stderr, "error: --cores_array expects a bracketed list like [0,1,2]\n");
+      exit(1);
+    }
+
+  char* copy = strdup(arg);
+  if (copy == NULL)
+    {
+      perror("strdup");
+      exit(1);
+    }
+
+  copy[len - 1] = '\0';
+  char* cursor = copy + 1;
+  char* saveptr = NULL;
+  uint32_t* parsed = NULL;
+  size_t parsed_capacity = 0;
+  size_t parsed_count = 0;
+
+  for (char* token = strtok_r(cursor, ",", &saveptr);
+       token != NULL;
+       token = strtok_r(NULL, ",", &saveptr))
+    {
+      while (isspace((unsigned char) *token))
+        {
+          token++;
+        }
+
+      if (*token == '\0')
+        {
+          fprintf(stderr, "error: empty entry in --cores_array\n");
+          free(parsed);
+          free(copy);
+          exit(1);
+        }
+
+      errno = 0;
+      char* endptr = NULL;
+      long value = strtol(token, &endptr, 10);
+      if (errno != 0 || endptr == token || value < 0 || (unsigned long) value > UINT32_MAX)
+        {
+          fprintf(stderr, "error: invalid core id '%s' in --cores_array\n", token);
+          free(parsed);
+          free(copy);
+          exit(1);
+        }
+
+      while (isspace((unsigned char) *endptr))
+        {
+          endptr++;
+        }
+
+      if (*endptr != '\0')
+        {
+          fprintf(stderr, "error: unexpected character '%c' in --cores_array\n", *endptr);
+          free(parsed);
+          free(copy);
+          exit(1);
+        }
+
+      if (parsed_count == parsed_capacity)
+        {
+          size_t new_capacity = (parsed_capacity == 0) ? 4 : parsed_capacity * 2;
+          uint32_t* new_parsed = (uint32_t*) realloc(parsed, new_capacity * sizeof(uint32_t));
+          if (new_parsed == NULL)
+            {
+              perror("realloc");
+              free(parsed);
+              free(copy);
+              exit(1);
+            }
+          parsed = new_parsed;
+          parsed_capacity = new_capacity;
+        }
+
+      parsed[parsed_count++] = (uint32_t) value;
+    }
+
+  free(copy);
+
+  if (parsed_count == 0)
+    {
+      fprintf(stderr, "error: --cores_array must list at least one core\n");
+      free(parsed);
+      exit(1);
+    }
+
+  if (cores_option_explicit && parsed_count != test_cores)
+    {
+      fprintf(stderr,
+              "error: --cores_array lists %zu cores but --cores requested %u\n",
+              parsed_count, test_cores);
+      free(parsed);
+      exit(1);
+    }
+
+  if (!cores_option_explicit)
+    {
+      test_cores = (uint32_t) parsed_count;
+    }
+
+  ensure_cores_array_capacity(parsed_count);
+  memcpy(allocated_cores_array, parsed, parsed_count * sizeof(uint32_t));
+  free(parsed);
+
+  test_cores_array = allocated_cores_array;
+  cores_array_explicit = 1;
+  configured_cores_array_len = (uint32_t) parsed_count;
+
+  printf("Using cores array: ");
+  for (size_t idx = 0; idx < parsed_count; idx++)
+    {
+      printf("%u ", test_cores_array[idx]);
+    }
+  printf("\n");
+}
 
 
 int
@@ -132,7 +306,7 @@ main(int argc, char **argv)
 
   int i;
   char c;
-  while(1) 
+  while(1)
     {
       i = 0;
       c = getopt_long(argc, argv, "hc:r:t:x:m:y:z:o:e:fvup:s:", long_options, &i);
@@ -197,37 +371,55 @@ main(int argc, char **argv)
 	    }
 
 	  exit(0);
-	case 'c':
-	  test_cores = atoi(optarg);
-	  break;
+        case 'c':
+          {
+            errno = 0;
+            char* endptr = NULL;
+            long value = strtol(optarg, &endptr, 10);
+            if (errno != 0 || endptr == optarg || value <= 0 || (unsigned long) value > UINT32_MAX)
+              {
+                fprintf(stderr, "error: invalid --cores value '%s'\n", optarg);
+                exit(1);
+              }
+
+            while (isspace((unsigned char) *endptr))
+              {
+                endptr++;
+              }
+
+            if (*endptr != '\0')
+              {
+                fprintf(stderr, "error: invalid --cores value '%s'\n", optarg);
+                exit(1);
+              }
+
+            test_cores = (uint32_t) value;
+            cores_option_explicit = 1;
+            if (cores_array_explicit)
+              {
+                if (configured_cores_array_len != test_cores)
+                  {
+                    fprintf(stderr,
+                            "error: --cores_array lists %u cores but --cores requested %u\n",
+                            configured_cores_array_len, test_cores);
+                    exit(1);
+                  }
+              }
+            else
+              {
+                assign_default_cores_array(test_cores);
+              }
+          }
+          break;
 	case 'r':
 	  test_reps = atoi(optarg);
 	  break;
-	case 't':
-	  test_test = atoi(optarg);
-	  break;
-	case 'x': // user provided a core array
-		char *copy = strdup(optarg);
-		copy[strlen(copy) - 1] = '\0'; // remove closing ]
-		char *p = copy + 1;            // skip opening [
-    	int *arr = malloc(test_cores * sizeof(int));
-
-		char *tok = strtok(p, ",");
-		for (int i = 0; i < test_cores && tok; i++) {
-			arr[i] = atoi(tok);
-			tok = strtok(NULL, ",");
-		}
-
-		free(copy);
-		memcpy(test_cores_array, arr, test_cores * sizeof(uint32_t));
-
-		printf("Using cores array: ");
-		for (i = 0; i < test_cores; i++) {
-			printf("%d ", test_cores_array[i]);
-		}
-		printf("\n");
-
-	  break;
+        case 't':
+          test_test = parse_test_option(optarg);
+          break;
+        case 'x':
+          parse_cores_array_option(optarg);
+          break;
 	case 'o':
 	  test_core_others = atoi(optarg);
 	  break;
@@ -257,9 +449,15 @@ main(int argc, char **argv)
 	case '?':
 	  printf("Use -h or --help for help\n");
 	  exit(0);
-	default:
-	  exit(1);
-	}
+        default:
+          exit(1);
+        }
+    }
+
+
+  if (!cores_array_explicit)
+    {
+      assign_default_cores_array(test_cores);
     }
 
 
@@ -2100,6 +2298,42 @@ parse_size(char* optarg)
     }
 
   return test_mem_size_multi * atoi(optarg);
+}
+
+static int
+parse_test_option(const char* arg)
+{
+  if (arg == NULL)
+    {
+      fprintf(stderr, "error: missing test identifier\n");
+      exit(EXIT_FAILURE);
+    }
+
+  errno = 0;
+  char* endptr = NULL;
+  long numeric = strtol(arg, &endptr, 10);
+  if (endptr != arg && *endptr == '\0' && errno == 0)
+    {
+      if (numeric < 0 || numeric >= NUM_EVENTS)
+        {
+          fprintf(stderr, "error: test index %ld out of range (0-%d)\n", numeric, NUM_EVENTS - 1);
+          exit(EXIT_FAILURE);
+        }
+      return (int) numeric;
+    }
+
+  for (int idx = 0; idx < NUM_EVENTS; idx++)
+    {
+      if (strcasecmp(arg, moesi_type_des[idx]) == 0)
+        {
+          return idx;
+        }
+    }
+
+  fprintf(stderr, "error: unknown test '%s'\n", arg);
+  fprintf(stderr, "       supported identifiers are 0-%d or one of the names printed with --help\n",
+          NUM_EVENTS - 1);
+  exit(EXIT_FAILURE);
 }
 
 static void

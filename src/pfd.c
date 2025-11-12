@@ -42,6 +42,32 @@ THREAD_LOCAL volatile ticks** pfd_store;
 THREAD_LOCAL volatile ticks* _pfd_s;
 THREAD_LOCAL volatile ticks pfd_correction;
 
+static ticks
+measure_minimum_tick_delta(uint32_t attempts)
+{
+  ticks best = UINT64_MAX;
+
+  for (uint32_t i = 0; i < attempts; i++)
+    {
+      ticks start = getticks();
+      asm volatile ("" ::: "memory");
+      ticks end = getticks();
+      ticks delta = end - start;
+
+      if (delta > 0 && delta < best)
+        {
+          best = delta;
+        }
+    }
+
+  if (best == UINT64_MAX)
+    {
+      return 0;
+    }
+
+  return best;
+}
+
 static int
 ticks_compare(const void* lhs, const void* rhs)
 {
@@ -161,14 +187,19 @@ pfd_store_init(uint32_t num_entries)
 
   abs_deviation_t ad;
   get_abs_deviation(pfd_store[0], num_entries, &ad);
-  double std_pp = 100 * (1 - (ad.avg - ad.std_dev) / ad.avg);
+  double std_pp = NAN;
+  if (isfinite(ad.avg) && ad.avg != 0.0)
+    {
+      std_pp = 100 * (1 - (ad.avg - ad.std_dev) / ad.avg);
+    }
 
   if (std_pp > PFD_CORRECTION_CONF)
     {
       if (print_warning++ == 1)	/* print warning if 2 failed attempts */
 	{
-	  printf("* warning: avg pfd correction is %.1f with std deviation: %.1f%%. Recalculating.\n", 
-		 ad.avg, std_pp);
+          double printed_std_pp = isfinite(std_pp) ? std_pp : 0.0;
+          printf("* warning: avg pfd correction is %.1f with std deviation: %.1f%%. Recalculating.\n",
+                 ad.avg, printed_std_pp);
 	}
       if (tries-- > 0)
 	{
@@ -232,11 +263,21 @@ pfd_store_init(uint32_t num_entries)
          profiling overhead is too small to be observed accurately on this
          platform (e.g. due to coarse timers or aggressive virtualisation).
          Ensure we still subtract a sensible positive value so that later
-         computations never underflow.  Use the same conservative fallback as
-         the unknown-architecture branch above. */
-      corrected_avg = PFD_CONSERVATIVE_DEFAULT;
-      printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
-             corrected_avg);
+         computations never underflow.  Prefer a directly measured TSC delta,
+         falling back to a conservative constant if the timer never advanced. */
+      ticks measured = measure_minimum_tick_delta(64);
+      if (measured > 0)
+        {
+          corrected_avg = (double) measured;
+          printf("* warning: measured pfd correction <= 0; using direct rdtsc delta of %llu.\n",
+                 (long long unsigned int) measured);
+        }
+      else
+        {
+          corrected_avg = PFD_CONSERVATIVE_DEFAULT;
+          printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
+                 corrected_avg);
+        }
     }
   else if (corrected_avg < 1.0)
     {
@@ -287,9 +328,47 @@ pfd_store_init(uint32_t num_entries)
 
   ad.avg = corrected_avg;
   pfd_correction = correction;
+  if (pfd_correction <= 0)
+    {
+      /* The adjustment can still end up zero when the rdtsc delta never
+         increased above the noise floor.  Try another direct measurement
+         before falling back to the conservative constant. */
+      ticks measured = measure_minimum_tick_delta(64);
+      if (measured > 0)
+        {
+          pfd_correction = measured;
+          corrected_avg = (double) pfd_correction;
+          ad.avg = corrected_avg;
+          if (!isfinite(std_pp))
+            {
+              std_pp = 0.0;
+            }
+          printf("* warning: enforcing positive pfd correction via direct rdtsc delta of %llu cycles.\n",
+                 (long long unsigned int) pfd_correction);
+        }
+      else
+        {
+          pfd_correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
+          if (pfd_correction == 0)
+            {
+              pfd_correction = 1;
+            }
+          corrected_avg = (double) pfd_correction;
+          ad.avg = corrected_avg;
+          if (!isfinite(std_pp))
+            {
+              std_pp = 0.0;
+            }
+          printf("* warning: falling back to conservative pfd correction of %llu cycles.\n",
+                 (long long unsigned int) pfd_correction);
+        }
+    }
+
   assert(pfd_correction > 0);
-  
-  printf("* set pfd correction: %llu (std deviation: %.1f%%)\n", (long long unsigned int) pfd_correction, std_pp);
+
+  double printed_std_pp = isfinite(std_pp) ? std_pp : 0.0;
+  printf("* set pfd correction: %llu (std deviation: %.1f%%)\n",
+         (long long unsigned int) pfd_correction, printed_std_pp);
 }
 
 static inline 
