@@ -136,6 +136,38 @@ pfd_store_init(uint32_t num_entries)
 	}
     }
 
+  if (!isfinite(ad.avg))
+    {
+      /* The computed average can become NaN or +/-Inf when the raw samples
+         are all identical (e.g. constant zero) and the standard deviation
+         logic divides by zero.  Fall back to a conservative default rather
+         than propagating the NaN and tripping the assertion below. */
+      ad.avg = 32;
+      printf("* warning: measured pfd correction is non-finite; using conservative default of %.0f.\n",
+             ad.avg);
+    }
+  else if (ad.avg <= 0)
+    {
+      /* When the measured correction is zero or negative it means that the
+         profiling overhead is too small to be observed accurately on this
+         platform (e.g. due to coarse timers or aggressive virtualisation).
+         Ensure we still subtract a sensible positive value so that later
+         computations never underflow.  Use the same conservative fallback as
+         the unknown-architecture branch above. */
+      ad.avg = 32;
+      printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
+             ad.avg);
+    }
+  else if (ad.avg < 1.0)
+    {
+      /* Extremely small (sub-cycle) averages will truncate to zero when cast
+         to ticks.  These values appear on systems with very noisy timing
+         sources.  Clamp to the minimum meaningful correction. */
+      ad.avg = 1.0;
+      printf("* warning: measured pfd correction < 1; clamping to %.0f.\n",
+             ad.avg);
+    }
+
   pfd_correction = ad.avg;
   assert(pfd_correction > 0);
   
