@@ -42,16 +42,27 @@ for ((src=0; src<CORE_COUNT; src++)); do
       reason="timed out"
     elif [[ $status -ne 0 ]]; then
       reason="failed (exit status $status)"
+      if (( status > 128 )); then
+        signal_num=$((status - 128))
+        if signal_name=$(kill -l "$signal_num" 2>/dev/null); then
+          reason+=" (signal ${signal_num}/${signal_name})"
+        fi
+      fi
     fi
 
     mapfile -t stats < <(printf '%s\n' "$output" | awk '/Core [0-9]+ : avg/ {printf "%s %s\n", $3, $6}')
 
     if [[ ${#stats[@]} -lt 2 ]]; then
-      if [[ -n $reason ]]; then
-        echo "Run ${reason} for $src,$dst" >&2
-      else
-        echo "Unexpected output format for cores $src,$dst" >&2
-      fi
+      {
+        if [[ -n $reason ]]; then
+          echo "Run ${reason} for $src,$dst"
+        else
+          echo "Unexpected output format for cores $src,$dst"
+        fi
+        echo "  Command: $BIN --test CAS --cores 2 --cores_array $cores_arg --repetitions $REPS"
+        echo "  Output:"
+        printf '%s\n' "$output" | sed 's/^/    /'
+      } >&2
       echo "${src},${dst},,,,"
       continue
     fi
@@ -62,7 +73,12 @@ for ((src=0; src<CORE_COUNT; src++)); do
     second_avg=$(awk '{print $2}' <<<"${stats[1]}")
 
     if [[ -n $reason ]]; then
-      echo "Run ${reason} for $src,$dst, but statistics were parsed" >&2
+      {
+        echo "Run ${reason} for $src,$dst, but statistics were parsed"
+        echo "  Command: $BIN --test CAS --cores 2 --cores_array $cores_arg --repetitions $REPS"
+        echo "  Output:"
+        printf '%s\n' "$output" | sed 's/^/    /'
+      } >&2
     fi
 
     echo "${src},${dst},${first_core},${first_avg},${second_core},${second_avg}"
