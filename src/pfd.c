@@ -36,6 +36,8 @@
 #include <math.h>
 #include "atomic_ops.h"
 
+#define PFD_CONSERVATIVE_DEFAULT 32.0
+
 THREAD_LOCAL volatile ticks** pfd_store;
 THREAD_LOCAL volatile ticks* _pfd_s;
 THREAD_LOCAL volatile ticks pfd_correction;
@@ -120,9 +122,9 @@ pfd_store_init(uint32_t num_entries)
 #elif defined(NIAGARA)
 	  ad.avg = 76;
 #elif defined(RYZEN53600)
-    ad.avg = 32;
+          ad.avg = 32;
 #elif defined(i3_7020U)
-    ad.avg = 25;
+          ad.avg = 25;
 #else
           printf("* warning: no default value for pfd correction is provided (fix in src/pfd.c)\n");
           /* Ensure that we still end up with a positive correction value even
@@ -131,9 +133,68 @@ pfd_store_init(uint32_t num_entries)
              must be greater than zero to keep the profiler functional.  Use a
              conservative default that mirrors the values used on similar x86
              systems. */
-          ad.avg = 32;
+          ad.avg = PFD_CONSERVATIVE_DEFAULT;
 #endif
-	}
+        }
+    }
+
+  double corrected_avg = ad.avg;
+  ticks correction = 0;
+
+  if (!isfinite(corrected_avg))
+    {
+      /* The computed average can become NaN or +/-Inf when the raw samples
+         are all identical (e.g. constant zero) and the standard deviation
+         logic divides by zero.  Fall back to a conservative default rather
+         than propagating the NaN and tripping the assertion below. */
+      corrected_avg = PFD_CONSERVATIVE_DEFAULT;
+      printf("* warning: measured pfd correction is non-finite; using conservative default of %.0f.\n",
+             corrected_avg);
+    }
+  else if (corrected_avg <= 0)
+    {
+      /* When the measured correction is zero or negative it means that the
+         profiling overhead is too small to be observed accurately on this
+         platform (e.g. due to coarse timers or aggressive virtualisation).
+         Ensure we still subtract a sensible positive value so that later
+         computations never underflow.  Use the same conservative fallback as
+         the unknown-architecture branch above. */
+      corrected_avg = PFD_CONSERVATIVE_DEFAULT;
+      printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
+             corrected_avg);
+    }
+  else if (corrected_avg < 1.0)
+    {
+      /* Extremely small (sub-cycle) averages will truncate to zero when cast
+         to ticks.  These values appear on systems with very noisy timing
+         sources.  Clamp to the minimum meaningful correction. */
+      corrected_avg = 1.0;
+      printf("* warning: measured pfd correction < 1; clamping to %.0f.\n",
+             corrected_avg);
+    }
+
+  if (corrected_avg >= (double) UINT64_MAX)
+    {
+      /* Guard against unrealistic averages overflowing the ticks type.  This
+         situation should not occur in practice, but clamping avoids undefined
+         behaviour in the conversion. */
+      correction = UINT64_MAX;
+      corrected_avg = (double) correction;
+      printf("* warning: measured pfd correction >= UINT64_MAX; clamping to %llu\n",
+             (long long unsigned int) correction);
+    }
+  else
+    {
+      correction = (ticks) (corrected_avg + 0.5);
+      if (correction == 0)
+        {
+          /* Rounding still produced zero (e.g. due to subnormal doubles).  Use
+             the minimum positive correction so the profiler remains usable. */
+          correction = 1;
+          corrected_avg = (double) correction;
+          printf("* warning: rounded pfd correction was 0; clamping to %llu\n",
+                 (long long unsigned int) correction);
+        }
     }
 
   if (ad.avg <= 0)
