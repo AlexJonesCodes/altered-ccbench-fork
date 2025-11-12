@@ -3,7 +3,17 @@ set -euo pipefail
 
 BIN=${BIN:-./ccbench}
 REPS=${REPS:-10000}
-CORE_COUNT=${CORE_COUNT:-8}
+if [[ -z ${CORE_COUNT:-} ]]; then
+  if command -v nproc >/dev/null 2>&1; then
+    CORE_COUNT=$(nproc)
+  else
+    CORE_COUNT=8
+  fi
+fi
+if (( CORE_COUNT < 2 )); then
+  echo "error: CORE_COUNT must be at least 2 (got ${CORE_COUNT})" >&2
+  exit 1
+fi
 TIMEOUT=${TIMEOUT:-60}
 
 if [[ ! -x "$BIN" ]]; then
@@ -21,8 +31,11 @@ for ((src=0; src<CORE_COUNT; src++)); do
     cores_arg="[$src,$dst]"
     #echo "Running CAS on cores $src and $dst..." >&2
 
-    output=$(timeout "$TIMEOUT" "$BIN" --test CAS --cores 2 --cores_array "$cores_arg" --repetitions "$REPS" 2>&1)
-    status=$?
+    if output=$(timeout "$TIMEOUT" "$BIN" --test CAS --cores 2 --cores_array "$cores_arg" --repetitions "$REPS" 2>&1); then
+      status=0
+    else
+      status=$?
+    fi
 
     reason=""
     if [[ $status -eq 124 ]]; then
