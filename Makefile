@@ -1,8 +1,8 @@
 SRC = src
 INCLUDE = include
 
-CFLAGS = -O3 -Wall
-LDFLAGS = -lm -lrt
+CFLAGS = -O3 -Wall -pthread
+LDFLAGS = -lm -lrt -pthread
 VER_FLAGS = -D_GNU_SOURCE
 
 ifeq ($(VERSION),DEBUG) 
