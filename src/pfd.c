@@ -39,6 +39,7 @@
 #include "atomic_ops.h"
 
 #define PFD_CONSERVATIVE_DEFAULT 32.0
+#define PFD_MIN_DELTA_ATTEMPTS 512
 
 THREAD_LOCAL volatile ticks** pfd_store;
 THREAD_LOCAL volatile ticks* _pfd_s;
@@ -179,7 +180,7 @@ median_non_zero_ticks(const volatile ticks* samples, uint32_t num_entries)
 }
 
 static ticks
-estimate_median_rdtsc_delta(uint32_t num_entries)
+estimate_median_rdtsc_delta(uint32_t num_entries, uint32_t* out_sample_count)
 {
   if (num_entries == 0)
     {
@@ -187,9 +188,17 @@ estimate_median_rdtsc_delta(uint32_t num_entries)
     }
 
   const uint32_t sample_count = num_entries < 1024 ? num_entries : 1024;
+  if (out_sample_count != NULL)
+    {
+      *out_sample_count = sample_count;
+    }
   ticks* samples = (ticks*) malloc(sample_count * sizeof(ticks));
   if (samples == NULL)
     {
+      if (out_sample_count != NULL)
+        {
+          *out_sample_count = 0;
+        }
       return 0;
     }
 
