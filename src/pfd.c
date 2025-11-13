@@ -34,7 +34,6 @@
 
 #include "pfd.h"
 #include <math.h>
-#include <pthread.h>
 #include <string.h>
 #include "atomic_ops.h"
 
@@ -178,9 +177,24 @@ estimate_median_rdtsc_delta(uint32_t num_entries)
   return correction;
 }
 
-static ticks
-calibrate_pfd_correction(uint32_t num_entries)
+void
+pfd_store_init(uint32_t num_entries)
 {
+  if (num_entries == 0)
+    {
+      return 0;
+    }
+
+  const uint32_t sample_count = num_entries < 1024 ? num_entries : 1024;
+  ticks* samples = (ticks*) malloc(sample_count * sizeof(ticks));
+  if (samples == NULL)
+    {
+      pfd_store[i] = (ticks*) malloc(num_entries * sizeof(ticks));
+      assert(pfd_store[i] != NULL);
+      PREFETCHW((void*) &pfd_store[i][0]);
+      memset((void*) pfd_store[i], 0, num_entries * sizeof(ticks));
+    }
+
   ticks correction = estimate_median_rdtsc_delta(num_entries);
   if (correction == 0)
     {
@@ -207,61 +221,15 @@ calibrate_pfd_correction(uint32_t num_entries)
       printf("* set pfd correction: %llu (median rdtsc delta)\n",
              (long long unsigned int) correction);
     }
-
-  return correction == 0 ? 1 : correction;
-}
-
-void
-pfd_store_init(uint32_t num_entries)
-{
-  if (pfd_store != NULL)
-    {
-      for (uint32_t i = 0; i < PFD_NUM_STORES; i++)
-        {
-          free((void*) pfd_store[i]);
-          pfd_store[i] = NULL;
-        }
-      free((void*) pfd_store);
-      pfd_store = NULL;
-    }
-
-  free((void*) _pfd_s);
-  _pfd_s = NULL;
-
-  _pfd_s = (volatile ticks*) malloc(PFD_NUM_STORES * sizeof(ticks));
-  pfd_store = (volatile ticks**) malloc(PFD_NUM_STORES * sizeof(ticks*));
-  assert(_pfd_s != NULL && pfd_store != NULL);
-
-  volatile uint32_t i;
-  for (i = 0; i < PFD_NUM_STORES; i++)
-    {
-      pfd_store[i] = (ticks*) malloc(num_entries * sizeof(ticks));
-      assert(pfd_store[i] != NULL);
-      PREFETCHW((void*) &pfd_store[i][0]);
-      memset((void*) pfd_store[i], 0, num_entries * sizeof(ticks));
-    }
-
-  ticks correction = 0;
-  pthread_mutex_lock(&pfd_correction_mutex);
-  if (global_pfd_correction > 0 && global_pfd_num_entries == num_entries)
-    {
-      correction = global_pfd_correction;
-    }
-  else
-    {
-      correction = calibrate_pfd_correction(num_entries);
-      global_pfd_correction = correction;
-      global_pfd_num_entries = num_entries;
-    }
   pthread_mutex_unlock(&pfd_correction_mutex);
 
   pfd_correction = correction;
   if (pfd_correction == 0)
     {
-      fprintf(stderr,
-              "* error: rdtsc calibration returned zero; forcing conservative correction of 1 cycle.\n");
       pfd_correction = 1;
     }
+
+  assert(pfd_correction > 0);
 }
 
 
