@@ -567,7 +567,11 @@ main(int argc, char **argv)
       int rc = pthread_create(&threads[rank - 1], NULL, worker_trampoline, (void*) (uintptr_t) rank);
       if (rc != 0)
         {
-          fprintf(stderr, "pthread_create failed: %s\n", strerror(rc));
+          fprintf(stderr,
+                  "pthread_create failed for worker rank %u (core %u): %s\n",
+                  rank,
+                  test_cores_array[rank],
+                  strerror(rc));
           exit(1);
         }
     }
@@ -579,7 +583,11 @@ main(int argc, char **argv)
       int rc = pthread_join(threads[rank - 1], NULL);
       if (rc != 0)
         {
-          fprintf(stderr, "pthread_join failed: %s\n", strerror(rc));
+          fprintf(stderr,
+                  "pthread_join failed for worker rank %u (thread handle %p): %s\n",
+                  rank,
+                  (void*) threads[rank - 1],
+                  strerror(rc));
           exit(1);
         }
     }
