@@ -41,7 +41,11 @@
 
 THREAD_LOCAL volatile ticks** pfd_store;
 THREAD_LOCAL volatile ticks* _pfd_s;
-THREAD_LOCAL volatile ticks pfd_correction;
+THREAD_LOCAL volatile ticks pfd_correction = 1;
+
+static pthread_mutex_t pfd_correction_mutex = PTHREAD_MUTEX_INITIALIZER;
+static ticks global_pfd_correction;
+static uint32_t global_pfd_num_entries;
 
 static ticks
 measure_minimum_tick_delta(uint32_t attempts)
@@ -176,26 +180,14 @@ estimate_median_rdtsc_delta(uint32_t num_entries)
 void
 pfd_store_init(uint32_t num_entries)
 {
-  if (pfd_store != NULL)
+  if (num_entries == 0)
     {
-      for (uint32_t i = 0; i < PFD_NUM_STORES; i++)
-        {
-          free((void*) pfd_store[i]);
-          pfd_store[i] = NULL;
-        }
-      free((void*) pfd_store);
-      pfd_store = NULL;
+      return 0;
     }
 
-  free((void*) _pfd_s);
-  _pfd_s = NULL;
-
-  _pfd_s = (volatile ticks*) malloc(PFD_NUM_STORES * sizeof(ticks));
-  pfd_store = (volatile ticks**) malloc(PFD_NUM_STORES * sizeof(ticks*));
-  assert(_pfd_s != NULL && pfd_store != NULL);
-
-  volatile uint32_t i;
-  for (i = 0; i < PFD_NUM_STORES; i++)
+  const uint32_t sample_count = num_entries < 1024 ? num_entries : 1024;
+  ticks* samples = (ticks*) malloc(sample_count * sizeof(ticks));
+  if (samples == NULL)
     {
       pfd_store[i] = (ticks*) malloc(num_entries * sizeof(ticks));
       assert(pfd_store[i] != NULL);
@@ -229,6 +221,7 @@ pfd_store_init(uint32_t num_entries)
       printf("* set pfd correction: %llu (median rdtsc delta)\n",
              (long long unsigned int) correction);
     }
+  pthread_mutex_unlock(&pfd_correction_mutex);
 
   pfd_correction = correction;
   if (pfd_correction == 0)
