@@ -42,6 +42,14 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
+BIN_PATH=$(command -v "$BIN" || true)
+BIN_SHA256="unavailable"
+if [[ -n "$BIN_PATH" ]] && command -v sha256sum >/dev/null 2>&1; then
+  BIN_SHA256=$(sha256sum "$BIN_PATH" | awk '{print $1}')
+fi
+BIN_SIZE=$(stat -c '%s' "$BIN" 2>/dev/null || echo "unavailable")
+BIN_MTIME=$(stat -c '%y' "$BIN" 2>/dev/null || echo "unavailable")
+
 mkdir -p "$LOG_DIR"
 
 echo "source_core,target_core,reported_core_a,avg_cycles_a,reported_core_b,avg_cycles_b"
