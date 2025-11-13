@@ -17,6 +17,26 @@ if (( CORE_COUNT < 2 )); then
 fi
 TIMEOUT=${TIMEOUT:-60}
 
+# Automatically rebuild the default benchmark binary when it is out of date.
+# This avoids confusing situations where a stale executable is used after the
+# sources have been updated (for example after a `git pull`).  The behaviour can
+# be disabled by setting SKIP_AUTO_BUILD=1.
+if [[ ${SKIP_AUTO_BUILD:-0} -eq 0 ]] \
+   && [[ "$BIN" == "./ccbench" || "$BIN" == "ccbench" ]] \
+   && [[ -f Makefile ]] \
+   && command -v make >/dev/null 2>&1; then
+  if ! make -q >/dev/null 2>&1; then
+    status=$?
+    if [[ $status -eq 1 ]]; then
+      echo "* info: rebuilding ccbench before running benchmarks..." >&2
+      make >&2
+    elif [[ $status -ne 0 ]]; then
+      echo "* warning: unable to determine build status (make -q exited with $status); attempting rebuild." >&2
+      make >&2
+    fi
+  fi
+fi
+
 if [[ ! -x "$BIN" ]]; then
   echo "error: $BIN not found or not executable" >&2
   exit 1
