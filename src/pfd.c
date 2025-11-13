@@ -50,30 +50,6 @@ static ticks global_pfd_correction;
 static uint32_t global_pfd_num_entries;
 
 static void
-report_correction_choice(const char* level,
-                         const char* reason,
-                         uint32_t num_entries,
-                         uint32_t sample_count,
-                         ticks median,
-                         uint32_t min_attempts,
-                         ticks min_delta,
-                         ticks final_value)
-{
-  fprintf(stderr,
-          "* %s: pfd correction (thread=%lu entries=%u samples=%u) median=%llu min_delta=%llu (attempts=%u) -> %llu cycles (%s)\n",
-          level,
-          (unsigned long) pthread_self(),
-          (unsigned) num_entries,
-          (unsigned) sample_count,
-          (unsigned long long) median,
-          (unsigned long long) min_delta,
-          (unsigned) min_attempts,
-          (unsigned long long) final_value,
-          reason);
-  fflush(stderr);
-}
-
-static void
 allocate_thread_local_store(uint32_t num_entries)
 {
   if (pfd_store != NULL && _pfd_s != NULL)
@@ -267,52 +243,31 @@ pfd_store_init(uint32_t num_entries)
 
   if (global_pfd_correction == 0 || global_pfd_num_entries != num_entries)
     {
-      uint32_t sample_count = 0;
-      ticks correction = estimate_median_rdtsc_delta(num_entries, &sample_count);
-      ticks median = correction;
-      ticks min_delta = 0;
+      ticks correction = estimate_median_rdtsc_delta(num_entries);
       if (correction == 0)
         {
-          min_delta = measure_minimum_tick_delta(PFD_MIN_DELTA_ATTEMPTS);
-          if (min_delta == 0)
+          ticks measured = measure_minimum_tick_delta(512);
+          if (measured == 0)
             {
               correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
               if (correction == 0)
                 {
                   correction = 1;
                 }
-              report_correction_choice("warning",
-                                       "median=0 and min_delta=0; using conservative default",
-                                       num_entries,
-                                       sample_count,
-                                       median,
-                                       PFD_MIN_DELTA_ATTEMPTS,
-                                       min_delta,
-                                       correction);
+              printf("* warning: unable to measure rdtsc delta; using conservative default of %llu cycles.\n",
+                     (long long unsigned int) correction);
             }
           else
             {
-              correction = min_delta;
-              report_correction_choice("warning",
-                                       "median=0; using measured min delta",
-                                       num_entries,
-                                       sample_count,
-                                       median,
-                                       PFD_MIN_DELTA_ATTEMPTS,
-                                       min_delta,
-                                       correction);
+              correction = measured;
+              printf("* warning: rdtsc median unavailable; using minimum delta of %llu cycles.\n",
+                     (long long unsigned int) correction);
             }
         }
       else
         {
-          report_correction_choice("info",
-                                   "median measurement succeeded",
-                                   num_entries,
-                                   sample_count,
-                                   median,
-                                   PFD_MIN_DELTA_ATTEMPTS,
-                                   min_delta,
-                                   correction);
+          printf("* set pfd correction: %llu (median rdtsc delta)\n",
+                 (long long unsigned int) correction);
         }
 
       global_pfd_correction = correction;
@@ -324,30 +279,13 @@ pfd_store_init(uint32_t num_entries)
 
   if (correction == 0)
     {
-      report_correction_choice("error",
-                               "global correction unexpectedly zero; forcing to 1",
-                               num_entries,
-                               0,
-                               0,
-                               PFD_MIN_DELTA_ATTEMPTS,
-                               0,
-                               1);
       correction = 1;
+      printf("* warning: rdtsc correction unexpectedly zero; forcing to 1 cycle.\n");
     }
 
   pfd_correction = correction;
-  if (pfd_correction == 0)
-    {
-      report_correction_choice("error",
-                               "thread-local correction zero after assignment; forcing to 1",
-                               num_entries,
-                               0,
-                               0,
-                               PFD_MIN_DELTA_ATTEMPTS,
-                               0,
-                               1);
-      pfd_correction = 1;
-    }
+
+  assert(pfd_correction > 0);
 }
 
 
