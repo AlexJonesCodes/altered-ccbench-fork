@@ -34,13 +34,19 @@
 
 #include "pfd.h"
 #include <math.h>
+#include <pthread.h>
+#include <string.h>
 #include "atomic_ops.h"
 
 #define PFD_CONSERVATIVE_DEFAULT 32.0
 
 THREAD_LOCAL volatile ticks** pfd_store;
 THREAD_LOCAL volatile ticks* _pfd_s;
-THREAD_LOCAL volatile ticks pfd_correction;
+THREAD_LOCAL volatile ticks pfd_correction = 1;
+
+static pthread_mutex_t pfd_correction_mutex = PTHREAD_MUTEX_INITIALIZER;
+static ticks global_pfd_correction;
+static uint32_t global_pfd_num_entries;
 
 static ticks
 measure_minimum_tick_delta(uint32_t attempts)
@@ -132,7 +138,80 @@ median_non_zero_ticks(const volatile ticks* samples, uint32_t num_entries)
   return median;
 }
 
-void 
+static ticks
+estimate_median_rdtsc_delta(uint32_t num_entries)
+{
+  if (num_entries == 0)
+    {
+      return 0;
+    }
+
+  const uint32_t sample_count = num_entries < 1024 ? num_entries : 1024;
+  ticks* samples = (ticks*) malloc(sample_count * sizeof(ticks));
+  if (samples == NULL)
+    {
+      return 0;
+    }
+
+  for (uint32_t i = 0; i < sample_count; i++)
+    {
+      ticks start = getticks();
+      asm volatile ("" ::: "memory");
+      ticks end = getticks();
+      ticks delta = end - start;
+      samples[i] = delta;
+    }
+
+  double median = median_non_zero_ticks(samples, sample_count);
+  free(samples);
+
+  if (!isfinite(median) || median <= 0.0)
+    {
+      return 0;
+    }
+
+  ticks correction = (ticks) (median + 0.5);
+  if (correction == 0)
+    {
+      correction = 1;
+    }
+  return correction;
+}
+
+static ticks
+calibrate_pfd_correction(uint32_t num_entries)
+{
+  ticks correction = estimate_median_rdtsc_delta(num_entries);
+  if (correction == 0)
+    {
+      ticks measured = measure_minimum_tick_delta(512);
+      if (measured == 0)
+        {
+          correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
+          if (correction == 0)
+            {
+              correction = 1;
+            }
+          printf("* warning: unable to measure rdtsc delta; using conservative default of %llu cycles.\n",
+                 (long long unsigned int) correction);
+        }
+      else
+        {
+          correction = measured;
+          printf("* warning: rdtsc median unavailable; using minimum delta of %llu cycles.\n",
+                 (long long unsigned int) correction);
+        }
+    }
+  else
+    {
+      printf("* set pfd correction: %llu (median rdtsc delta)\n",
+             (long long unsigned int) correction);
+    }
+
+  return correction == 0 ? 1 : correction;
+}
+
+void
 pfd_store_init(uint32_t num_entries)
 {
   if (pfd_store != NULL)
@@ -159,201 +238,32 @@ pfd_store_init(uint32_t num_entries)
       pfd_store[i] = (ticks*) malloc(num_entries * sizeof(ticks));
       assert(pfd_store[i] != NULL);
       PREFETCHW((void*) &pfd_store[i][0]);
+      memset((void*) pfd_store[i], 0, num_entries * sizeof(ticks));
     }
 
-  int32_t tries = 10;
-  uint32_t print_warning = 0;
-
-
-#if defined(XEON) || defined(OPTERON2) || defined(XEON2) || defined(DEFAULT) || defined(i3_7020U)
-  /* enforcing max freq if freq scaling is enabled */
-  volatile uint64_t speed;
-  for (speed = 0; speed < 20e7; speed++)
-    {
-      asm volatile ("");
-    }
-#endif	/* XEON */
-
-  pfd_correction = 0;
-
-#define PFD_CORRECTION_CONF 3
- retry:
-  for (i = 0; i < num_entries; i++)
-    {
-      PFDI(0);
-      asm volatile ("");
-      PFDO(0, i);
-    }
-
-  abs_deviation_t ad;
-  get_abs_deviation(pfd_store[0], num_entries, &ad);
-  double std_pp = NAN;
-  if (isfinite(ad.avg) && ad.avg != 0.0)
-    {
-      std_pp = 100 * (1 - (ad.avg - ad.std_dev) / ad.avg);
-    }
-
-  if (std_pp > PFD_CORRECTION_CONF)
-    {
-      if (print_warning++ == 1)	/* print warning if 2 failed attempts */
-	{
-          double printed_std_pp = isfinite(std_pp) ? std_pp : 0.0;
-          printf("* warning: avg pfd correction is %.1f with std deviation: %.1f%%. Recalculating.\n",
-                 ad.avg, printed_std_pp);
-	}
-      if (tries-- > 0)
-	{
-	  goto retry;
-	}
-      else
-        {
-          printf("* warning: setting pfd correction manually\n");
-          double manual_avg = median_non_zero_ticks(pfd_store[0], num_entries);
-          if (isfinite(manual_avg) && manual_avg > 0)
-            {
-              ad.avg = manual_avg;
-              printf("* warning: using median pfd correction of %.1f cycles after repeated retries.\n",
-                     ad.avg);
-            }
-          else
-            {
-#if defined(OPTERON)
-              ad.avg = 64;
-#elif defined(OPTERON2)
-              ad.avg = 68;
-#elif defined(XEON) || defined(XEON2)
-              ad.avg = 20;
-#elif defined(NIAGARA)
-              ad.avg = 76;
-#elif defined(RYZEN53600)
-              ad.avg = 32;
-#elif defined(i3_7020U)
-              ad.avg = 25;
-#else
-              printf("* warning: unknown architecture; using conservative pfd correction default of %.0f cycles.\n",
-                     PFD_CONSERVATIVE_DEFAULT);
-              /* Ensure that we still end up with a positive correction value even
-                 when running on an unknown architecture.  The exact value is not
-                 critical (it simply compensates for measurement overhead), but it
-                 must be greater than zero to keep the profiler functional.  Use a
-                 conservative default that mirrors the values used on similar x86
-                 systems. */
-              ad.avg = PFD_CONSERVATIVE_DEFAULT;
-#endif
-            }
-        }
-    }
-
-  double corrected_avg = ad.avg;
   ticks correction = 0;
-
-  if (!isfinite(corrected_avg))
+  pthread_mutex_lock(&pfd_correction_mutex);
+  if (global_pfd_correction > 0 && global_pfd_num_entries == num_entries)
     {
-      /* The computed average can become NaN or +/-Inf when the raw samples
-         are all identical (e.g. constant zero) and the standard deviation
-         logic divides by zero.  Fall back to a conservative default rather
-         than propagating the NaN and tripping the assertion below. */
-      corrected_avg = PFD_CONSERVATIVE_DEFAULT;
-      printf("* warning: measured pfd correction is non-finite; using conservative default of %.0f.\n",
-             corrected_avg);
-    }
-  else if (corrected_avg <= 0)
-    {
-      /* When the measured correction is zero or negative it means that the
-         profiling overhead is too small to be observed accurately on this
-         platform (e.g. due to coarse timers or aggressive virtualisation).
-         Ensure we still subtract a sensible positive value so that later
-         computations never underflow.  Prefer a directly measured TSC delta,
-         falling back to a conservative constant if the timer never advanced. */
-      ticks measured = measure_minimum_tick_delta(64);
-      if (measured > 0)
-        {
-          corrected_avg = (double) measured;
-          printf("* warning: measured pfd correction <= 0; using direct rdtsc delta of %llu.\n",
-                 (long long unsigned int) measured);
-        }
-      else
-        {
-          corrected_avg = PFD_CONSERVATIVE_DEFAULT;
-          printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
-                 corrected_avg);
-        }
-    }
-  else if (corrected_avg < 1.0)
-    {
-      /* Extremely small (sub-cycle) averages will truncate to zero when cast
-         to ticks.  These values appear on systems with very noisy timing
-         sources.  Clamp to the minimum meaningful correction. */
-      corrected_avg = 1.0;
-      printf("* warning: measured pfd correction < 1; clamping to %.0f.\n",
-             corrected_avg);
-    }
-
-  if (corrected_avg >= (double) UINT64_MAX)
-    {
-      /* Guard against unrealistic averages overflowing the ticks type.  This
-         situation should not occur in practice, but clamping avoids undefined
-         behaviour in the conversion. */
-      correction = UINT64_MAX;
-      corrected_avg = (double) correction;
-      printf("* warning: measured pfd correction >= UINT64_MAX; clamping to %llu\n",
-             (long long unsigned int) correction);
+      correction = global_pfd_correction;
     }
   else
     {
-      correction = (ticks) (corrected_avg + 0.5);
-      if (correction == 0)
-        {
-          /* Rounding still produced zero (e.g. due to subnormal doubles).  Use
-             the minimum positive correction so the profiler remains usable. */
-          correction = 1;
-          corrected_avg = (double) correction;
-          printf("* warning: rounded pfd correction was 0; clamping to %llu\n",
-                 (long long unsigned int) correction);
-        }
+      correction = calibrate_pfd_correction(num_entries);
+      global_pfd_correction = correction;
+      global_pfd_num_entries = num_entries;
     }
+  pthread_mutex_unlock(&pfd_correction_mutex);
 
-  if (ad.avg <= 0)
-    {
-      /* When the measured correction is zero or negative it means that the
-         profiling overhead is too small to be observed accurately on this
-         platform (e.g. due to coarse timers or aggressive virtualisation).
-         Ensure we still subtract a sensible positive value so that later
-         computations never underflow.  Use the same conservative fallback as
-         the unknown-architecture branch above. */
-      ad.avg = PFD_CONSERVATIVE_DEFAULT;
-      printf("* warning: measured pfd correction <= 0; using conservative default of %.0f.\n",
-             ad.avg);
-    }
-
-  ad.avg = corrected_avg;
   pfd_correction = correction;
-  if (pfd_correction <= 0)
+  if (pfd_correction == 0)
     {
-      /* As a last resort, ensure that the profiler still has a positive
-         correction.  This can occur if all measurement attempts returned
-         zero (e.g. due to aggressive virtualisation). */
-      pfd_correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
-      if (pfd_correction == 0)
-        {
-          pfd_correction = 1;
-        }
-      corrected_avg = (double) pfd_correction;
-      ad.avg = corrected_avg;
-      if (!isfinite(std_pp))
-        {
-          std_pp = 0.0;
-        }
-      printf("* warning: falling back to conservative pfd correction of %llu cycles.\n",
-             (long long unsigned int) pfd_correction);
+      fprintf(stderr,
+              "* error: rdtsc calibration returned zero; forcing conservative correction of 1 cycle.\n");
+      pfd_correction = 1;
     }
-
-  assert(pfd_correction > 0);
-
-  double printed_std_pp = isfinite(std_pp) ? std_pp : 0.0;
-  printf("* set pfd correction: %llu (std deviation: %.1f%%)\n",
-         (long long unsigned int) pfd_correction, printed_std_pp);
 }
+
 
 static inline 
 double absd(double x)
