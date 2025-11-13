@@ -34,10 +34,12 @@
 
 #include "pfd.h"
 #include <math.h>
+#include <pthread.h>
 #include <string.h>
 #include "atomic_ops.h"
 
 #define PFD_CONSERVATIVE_DEFAULT 32.0
+#define PFD_MIN_DELTA_ATTEMPTS 512
 
 THREAD_LOCAL volatile ticks** pfd_store;
 THREAD_LOCAL volatile ticks* _pfd_s;
@@ -46,6 +48,70 @@ THREAD_LOCAL volatile ticks pfd_correction = 1;
 static pthread_mutex_t pfd_correction_mutex = PTHREAD_MUTEX_INITIALIZER;
 static ticks global_pfd_correction;
 static uint32_t global_pfd_num_entries;
+
+static void
+report_correction_choice(const char* level,
+                         const char* reason,
+                         uint32_t num_entries,
+                         uint32_t sample_count,
+                         ticks median,
+                         uint32_t min_attempts,
+                         ticks min_delta,
+                         ticks final_value)
+{
+  fprintf(stderr,
+          "* %s: pfd correction (thread=%lu entries=%u samples=%u) median=%llu min_delta=%llu (attempts=%u) -> %llu cycles (%s)\n",
+          level,
+          (unsigned long) pthread_self(),
+          (unsigned) num_entries,
+          (unsigned) sample_count,
+          (unsigned long long) median,
+          (unsigned long long) min_delta,
+          (unsigned) min_attempts,
+          (unsigned long long) final_value,
+          reason);
+  fflush(stderr);
+}
+
+static void
+allocate_thread_local_store(uint32_t num_entries)
+{
+  if (pfd_store != NULL && _pfd_s != NULL)
+    {
+      return;
+    }
+
+  pfd_store = (volatile ticks**) calloc(PFD_NUM_STORES, sizeof(volatile ticks*));
+  if (pfd_store == NULL)
+    {
+      fprintf(stderr,
+              "pfd_store_init: unable to allocate %u store pointers for thread %lu\n",
+              PFD_NUM_STORES, (unsigned long) pthread_self());
+      exit(1);
+    }
+
+  _pfd_s = (volatile ticks*) calloc(PFD_NUM_STORES, sizeof(volatile ticks));
+  if (_pfd_s == NULL)
+    {
+      fprintf(stderr,
+              "pfd_store_init: unable to allocate scratch space for thread %lu\n",
+              (unsigned long) pthread_self());
+      exit(1);
+    }
+
+  for (uint32_t i = 0; i < PFD_NUM_STORES; i++)
+    {
+      pfd_store[i] = (volatile ticks*) calloc(num_entries, sizeof(ticks));
+      if (pfd_store[i] == NULL)
+        {
+          fprintf(stderr,
+                  "pfd_store_init: unable to allocate store %u (%u entries) for thread %lu\n",
+                  i, num_entries, (unsigned long) pthread_self());
+          exit(1);
+        }
+      PREFETCHW((void*) &pfd_store[i][0]);
+    }
+}
 
 static ticks
 measure_minimum_tick_delta(uint32_t attempts)
@@ -138,7 +204,7 @@ median_non_zero_ticks(const volatile ticks* samples, uint32_t num_entries)
 }
 
 static ticks
-estimate_median_rdtsc_delta(uint32_t num_entries)
+estimate_median_rdtsc_delta(uint32_t num_entries, uint32_t* out_sample_count)
 {
   if (num_entries == 0)
     {
@@ -146,9 +212,17 @@ estimate_median_rdtsc_delta(uint32_t num_entries)
     }
 
   const uint32_t sample_count = num_entries < 1024 ? num_entries : 1024;
+  if (out_sample_count != NULL)
+    {
+      *out_sample_count = sample_count;
+    }
   ticks* samples = (ticks*) malloc(sample_count * sizeof(ticks));
   if (samples == NULL)
     {
+      if (out_sample_count != NULL)
+        {
+          *out_sample_count = 0;
+        }
       return 0;
     }
 
@@ -182,54 +256,98 @@ pfd_store_init(uint32_t num_entries)
 {
   if (num_entries == 0)
     {
-      return 0;
+      fprintf(stderr, "pfd_store_init: num_entries must be greater than zero\n");
+      pfd_correction = 1;
+      return;
     }
 
-  const uint32_t sample_count = num_entries < 1024 ? num_entries : 1024;
-  ticks* samples = (ticks*) malloc(sample_count * sizeof(ticks));
-  if (samples == NULL)
-    {
-      pfd_store[i] = (ticks*) malloc(num_entries * sizeof(ticks));
-      assert(pfd_store[i] != NULL);
-      PREFETCHW((void*) &pfd_store[i][0]);
-      memset((void*) pfd_store[i], 0, num_entries * sizeof(ticks));
-    }
+  allocate_thread_local_store(num_entries);
 
-  ticks correction = estimate_median_rdtsc_delta(num_entries);
-  if (correction == 0)
+  pthread_mutex_lock(&pfd_correction_mutex);
+
+  if (global_pfd_correction == 0 || global_pfd_num_entries != num_entries)
     {
-      ticks measured = measure_minimum_tick_delta(512);
-      if (measured == 0)
+      uint32_t sample_count = 0;
+      ticks correction = estimate_median_rdtsc_delta(num_entries, &sample_count);
+      ticks median = correction;
+      ticks min_delta = 0;
+      if (correction == 0)
         {
-          correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
-          if (correction == 0)
+          min_delta = measure_minimum_tick_delta(PFD_MIN_DELTA_ATTEMPTS);
+          if (min_delta == 0)
             {
-              correction = 1;
+              correction = (ticks) (PFD_CONSERVATIVE_DEFAULT + 0.5);
+              if (correction == 0)
+                {
+                  correction = 1;
+                }
+              report_correction_choice("warning",
+                                       "median=0 and min_delta=0; using conservative default",
+                                       num_entries,
+                                       sample_count,
+                                       median,
+                                       PFD_MIN_DELTA_ATTEMPTS,
+                                       min_delta,
+                                       correction);
             }
-          printf("* warning: unable to measure rdtsc delta; using conservative default of %llu cycles.\n",
-                 (long long unsigned int) correction);
+          else
+            {
+              correction = min_delta;
+              report_correction_choice("warning",
+                                       "median=0; using measured min delta",
+                                       num_entries,
+                                       sample_count,
+                                       median,
+                                       PFD_MIN_DELTA_ATTEMPTS,
+                                       min_delta,
+                                       correction);
+            }
         }
       else
         {
-          correction = measured;
-          printf("* warning: rdtsc median unavailable; using minimum delta of %llu cycles.\n",
-                 (long long unsigned int) correction);
+          report_correction_choice("info",
+                                   "median measurement succeeded",
+                                   num_entries,
+                                   sample_count,
+                                   median,
+                                   PFD_MIN_DELTA_ATTEMPTS,
+                                   min_delta,
+                                   correction);
         }
+
+      global_pfd_correction = correction;
+      global_pfd_num_entries = num_entries;
     }
-  else
-    {
-      printf("* set pfd correction: %llu (median rdtsc delta)\n",
-             (long long unsigned int) correction);
-    }
+
+  ticks correction = global_pfd_correction;
   pthread_mutex_unlock(&pfd_correction_mutex);
+
+  if (correction == 0)
+    {
+      report_correction_choice("error",
+                               "global correction unexpectedly zero; forcing to 1",
+                               num_entries,
+                               0,
+                               0,
+                               PFD_MIN_DELTA_ATTEMPTS,
+                               0,
+                               1);
+      correction = 1;
+    }
 
   pfd_correction = correction;
   if (pfd_correction == 0)
     {
+      report_correction_choice("error",
+                               "thread-local correction zero after assignment; forcing to 1",
+                               num_entries,
+                               0,
+                               0,
+                               PFD_MIN_DELTA_ATTEMPTS,
+                               0,
+                               1);
       pfd_correction = 1;
     }
-
-  assert(pfd_correction > 0);
 }
 
 
