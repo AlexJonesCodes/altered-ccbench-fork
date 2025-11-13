@@ -42,6 +42,14 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
+BIN_PATH=$(command -v "$BIN" || true)
+BIN_SHA256="unavailable"
+if [[ -n "$BIN_PATH" ]] && command -v sha256sum >/dev/null 2>&1; then
+  BIN_SHA256=$(sha256sum "$BIN_PATH" | awk '{print $1}')
+fi
+BIN_SIZE=$(stat -c '%s' "$BIN" 2>/dev/null || echo "unavailable")
+BIN_MTIME=$(stat -c '%y' "$BIN" 2>/dev/null || echo "unavailable")
+
 mkdir -p "$LOG_DIR"
 
 echo "source_core,target_core,reported_core_a,avg_cycles_a,reported_core_b,avg_cycles_b"
@@ -63,7 +71,43 @@ for ((src=0; src<CORE_COUNT; src++)); do
     fi
 
     printf '%s\n' "$output" >"$log_file"
-    excerpt=$(printf '%s\n' "$output" | head -n 20)
+
+    line_count=$(printf '%s\n' "$output" | wc -l)
+    byte_count=$(printf '%s' "$output" | wc -c)
+
+    generated_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    log_head=$(printf '%s\n' "$output" | head -n 200)
+    log_tail=$(printf '%s\n' "$output" | tail -n 200)
+    base64_dump="base64 command unavailable"
+    if command -v base64 >/dev/null 2>&1; then
+      base64_dump=$(printf '%s' "$output" | base64)
+    fi
+
+    excerpt=$'--- log metadata ---\n'
+    excerpt+="generated_at=${generated_at}\n"
+    excerpt+="source_core=${src}\n"
+    excerpt+="target_core=${dst}\n"
+    excerpt+="timeout_seconds=${TIMEOUT}\n"
+    excerpt+="repetitions=${REPS}\n"
+    excerpt+="cores_arg=${cores_arg}\n"
+    excerpt+="bin=${BIN}\n"
+    excerpt+="bin_path=${BIN_PATH:-unavailable}\n"
+    excerpt+="bin_sha256=${BIN_SHA256}\n"
+    excerpt+="bin_size_bytes=${BIN_SIZE}\n"
+    excerpt+="bin_mtime=${BIN_MTIME}\n"
+    excerpt+="status_code=${status}\n"
+    excerpt+="total_lines=${line_count}\n"
+    excerpt+="total_bytes=${byte_count}\n"
+    excerpt+=$'--- first 200 lines ---\n'
+    excerpt+="${log_head}"
+
+    if (( line_count > 200 )); then
+      excerpt+=$'\n--- last 200 lines ---\n'
+      excerpt+="${log_tail}"
+    fi
+
+    excerpt+=$'\n--- raw log (base64) ---\n'
+    excerpt+="${base64_dump}"
 
     reason=""
     if [[ $status -eq 124 ]]; then
