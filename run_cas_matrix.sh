@@ -63,7 +63,20 @@ for ((src=0; src<CORE_COUNT; src++)); do
     fi
 
     printf '%s\n' "$output" >"$log_file"
-    excerpt=$(printf '%s\n' "$output" | head -n 20)
+
+    line_count=$(printf '%s\n' "$output" | wc -l)
+    byte_count=$(printf '%s' "$output" | wc -c)
+
+    excerpt="--- log metadata ---\\n"
+    excerpt+="total_lines=${line_count}\\n"
+    excerpt+="total_bytes=${byte_count}\\n"
+    excerpt+="--- first 200 lines ---\\n"
+    excerpt+="$(printf '%s\n' "$output" | head -n 200)"
+
+    if (( line_count > 200 )); then
+      excerpt+="\\n--- last 200 lines ---\\n"
+      excerpt+="$(printf '%s\n' "$output" | tail -n 200)"
+    fi
 
     reason=""
     if [[ $status -eq 124 ]]; then
