@@ -75,41 +75,16 @@ for ((src=0; src<CORE_COUNT; src++)); do
     line_count=$(printf '%s\n' "$output" | wc -l)
     byte_count=$(printf '%s' "$output" | wc -c)
 
-    generated_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-    log_head=$(printf '%s\n' "$output" | head -n 200)
-    log_tail=$(printf '%s\n' "$output" | tail -n 200)
-    base64_dump="base64 command unavailable"
-    if command -v base64 >/dev/null 2>&1; then
-      base64_dump=$(printf '%s' "$output" | base64)
-    fi
+    excerpt="--- log metadata ---\\n"
+    excerpt+="total_lines=${line_count}\\n"
+    excerpt+="total_bytes=${byte_count}\\n"
+    excerpt+="--- first 200 lines ---\\n"
+    excerpt+="$(printf '%s\n' "$output" | head -n 200)"
 
-    excerpt=$(
-      {
-        printf '--- log metadata ---\n'
-        printf 'generated_at=%s\n' "$generated_at"
-        printf 'source_core=%s\n' "$src"
-        printf 'target_core=%s\n' "$dst"
-        printf 'timeout_seconds=%s\n' "$TIMEOUT"
-        printf 'repetitions=%s\n' "$REPS"
-        printf 'cores_arg=%s\n' "$cores_arg"
-        printf 'bin=%s\n' "$BIN"
-        printf 'bin_path=%s\n' "${BIN_PATH:-unavailable}"
-        printf 'bin_sha256=%s\n' "$BIN_SHA256"
-        printf 'bin_size_bytes=%s\n' "$BIN_SIZE"
-        printf 'bin_mtime=%s\n' "$BIN_MTIME"
-        printf 'status_code=%s\n' "$status"
-        printf 'total_lines=%s\n' "$line_count"
-        printf 'total_bytes=%s\n' "$byte_count"
-        printf '--- first 200 lines ---\n'
-        printf '%s\n' "$log_head"
-        if (( line_count > 200 )); then
-          printf '--- last 200 lines ---\n'
-          printf '%s\n' "$log_tail"
-        fi
-        printf '--- raw log (base64) ---\n'
-        printf '%s\n' "$base64_dump"
-      }
-    )
+    if (( line_count > 200 )); then
+      excerpt+="\\n--- last 200 lines ---\\n"
+      excerpt+="$(printf '%s\n' "$output" | tail -n 200)"
+    fi
 
     reason=""
     if [[ $status -eq 124 ]]; then
